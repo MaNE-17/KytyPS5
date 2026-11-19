@@ -1,0 +1,162 @@
+name: Build KytyPS5 saros-port (Windows, per CPU)
+
+# The emulator of the saros-port branch for Windows, built the way the branch's measurements were
+# (clang-cl, ThinLTO, -O3, profiling symbols for the `prof` sampler), once per CPU class:
+#   znver3     Ryzen 5000 (Zen 3) and newer Ryzen CPUs (Zen 4, Zen 5 run it too)
+#   x86-64-v3  any CPU with AVX2 (Intel Haswell and newer, Ryzen of every generation)
+# With NVIDIA's Streamline SDK headers, so frame generation and DLSS upscaling are built in
+# (the SDK's DLLs are still the player's to download; see docs/frame-generation.md).
+# Each zip holds kyty_emulator.exe, its PDB and what `cmake --install` adds: unpack it over a
+# release package of the branch (KytyPS5-saros-port-*-Windows-x64.zip).
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ saros-port-zen ]
+    tags: [ 'zen-*' ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SCCACHE_GHA_ENABLED: "true"
+  KYTY_BUILD_ORIGIN: Fork
+  KYTY_BUILD_REPOSITORY: ${{ github.repository }}
+
+jobs:
+  windows:
+    name: Windows x64 (${{ matrix.arch }})
+    runs-on: windows-2025
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [ znver3, x86-64-v3 ]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Visual Studio environment
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Locate vcpkg
+        id: vcpkg
+        shell: pwsh
+        run: |
+          $vcpkgRoot = Split-Path (Get-Command vcpkg).Source
+          $portHash = (Get-FileHash "$vcpkgRoot\ports\glslang\vcpkg.json" -Algorithm SHA256).Hash
+          "root=$vcpkgRoot" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "port_hash=$($portHash.ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Cache glslang
+        id: glslang_cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.vcpkg.outputs.root }}\installed\x64-windows
+          key: glslang-${{ runner.os }}-${{ runner.arch }}-${{ steps.vcpkg.outputs.port_hash }}-tools-opt
+
+      - name: Install glslang
+        shell: pwsh
+        run: |
+          $vcpkgRoot = "${{ steps.vcpkg.outputs.root }}"
+          if ("${{ steps.glslang_cache.outputs.cache-hit }}" -ne "true") {
+            vcpkg install glslang[tools,opt]:x64-windows
+          }
+          "$vcpkgRoot\installed\x64-windows\tools\glslang" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Streamline SDK headers
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # The newest release of NVIDIA-RTX/Streamline; the build goes on without frame
+          # generation when it cannot be had.
+          $ErrorActionPreference = "Continue"
+          $dest = "_Build\deps\streamline\sdk"
+          New-Item -ItemType Directory -Force -Path _Build\deps\streamline\dl | Out-Null
+          $assets = gh release view --repo NVIDIA-RTX/Streamline --json assets --jq '.assets[].name'
+          $zip = $assets | Where-Object { $_ -match '\.zip$' -and $_ -notmatch 'debug|symbol|pdb' } | Select-Object -First 1
+          if (-not $zip) { Write-Host "No Streamline zip found: frame generation is left out"; exit 0 }
+          Write-Host "Streamline: $zip"
+          gh release download --repo NVIDIA-RTX/Streamline --pattern $zip --dir _Build\deps\streamline\dl
+          Expand-Archive -Path "_Build\deps\streamline\dl\$zip" -DestinationPath _Build\deps\streamline\x -Force
+          $header = Get-ChildItem -Path _Build\deps\streamline\x -Recurse -Filter sl.h | Where-Object { $_.Directory.Name -eq 'include' } | Select-Object -First 1
+          if (-not $header) { Write-Host "sl.h not in $zip: frame generation is left out"; exit 0 }
+          $root = $header.Directory.Parent.FullName
+          New-Item -ItemType Directory -Force -Path _Build\deps\streamline | Out-Null
+          Move-Item -Path $root -Destination $dest
+          Get-ChildItem $dest
+          exit 0
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.11
+
+      - name: Verify toolchain
+        shell: cmd
+        run: |
+          cmake --version
+          ninja --version
+          clang-cl --version
+          glslangValidator --version
+
+      - name: Configure
+        shell: cmd
+        run: |
+          cmake -S . -B _Build/windows -G Ninja ^
+            -DCMAKE_BUILD_TYPE=Release ^
+            -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl ^
+            -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache ^
+            -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON ^
+            -DKYTY_BUILD_LAUNCHER=OFF ^
+            -DKYTY_NATIVE_OPT=ON ^
+            -DKYTY_TARGET_ARCH=${{ matrix.arch }} ^
+            -DKYTY_PROFILING_SYMBOLS=ON ^
+            -DKYTY_BUILD_ORIGIN=%KYTY_BUILD_ORIGIN% ^
+            -DKYTY_BUILD_REPOSITORY=%KYTY_BUILD_REPOSITORY% ^
+            -DKYTY_RELEASE_TAG=zen-${{ matrix.arch }}-%GITHUB_SHA:~0,7%
+
+      - name: Build
+        shell: cmd
+        run: cmake --build _Build/windows --target kyty_emulator
+
+      - name: Package
+        shell: pwsh
+        run: |
+          cmake --install _Build/windows --prefix _Build/windows/install
+          Copy-Item _Build/windows/kyty_emulator.pdb _Build/windows/install/ -ErrorAction SilentlyContinue
+          Copy-Item CHANGELOG.md, docs -Destination _Build/windows/install/ -Recurse -Force
+          Get-ChildItem _Build/windows/install
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: KytyPS5-saros-port-zen-${{ matrix.arch }}-Windows-x64
+          path: _Build/windows/install/**
+          if-no-files-found: error
+
+  release:
+    name: Release
+    if: startsWith(github.ref, 'refs/tags/zen-')
+    needs: windows
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: Zip
+        run: |
+          cd dist
+          for d in */; do (cd "$d" && zip -qr "../${d%/}.zip" .); done
+          ls -la
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" dist/*.zip --repo "${GITHUB_REPOSITORY}" \
+            --prerelease --title "KytyPS5 saros-port zen ${GITHUB_REF_NAME}" \
+            --notes "Test build for Ryzen (znver3) and AVX2 CPUs (x86-64-v3). Unpack over a saros-port release package; see CHANGELOG.md, section 'This fork: CPUs with 8 cores'."

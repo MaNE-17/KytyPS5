@@ -2,6 +2,7 @@
 
 #include "common/assert.h"
 #include "common/debugCounters.h"
+#include "common/emulatorConfig.h"
 #include "common/gpuTiming.h"
 #include "common/liveControl.h"
 #include "common/logging/log.h"
@@ -41,6 +42,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include <fmt/format.h>
+
 namespace Libs::Graphics {
 
 static thread_local Pm4Execution* g_current_execution = nullptr;
@@ -48,6 +51,11 @@ static thread_local GuestGpu*     g_gpu_state         = nullptr;
 
 GuestGpu::GuestGpu(RenderContext& renderer): m_renderer(renderer) {
 	EXIT_NOT_IMPLEMENTED(!Common::Thread::IsMainThread());
+	// The precompile pass and the list export run no game: they keep every CPU (decided before
+	// the GPU and recording threads place themselves).
+	if (Config::PrecompileOnlyEnabled() || !Config::ExportPipelineListPath().empty()) {
+		Common::Thread::DisableCpuLayout();
+	}
 	m_gfx_cp = std::make_unique<CommandProcessor>(renderer, 0);
 	m_thread = std::jthread(ThreadRun, this);
 }
@@ -475,6 +483,12 @@ void GuestGpu::ThreadRun(void* data) {
 	if (const char* cpus = std::getenv("KYTY_RENDER_CPUS"); cpus != nullptr && *cpus != '\0') {
 		const bool pinned = Common::Thread::PinCurrentThreadToCpus(cpus);
 		LOGF("GPU thread: KYTY_RENDER_CPUS=%s %s\n", cpus, pinned ? "applied" : "not applied");
+	}
+	// A core of its own on CPUs with SMT and one core class (threads.h, KYTY_CPU_LAYOUT).
+	{
+		const bool placed = Common::Thread::PlaceCurrentThread(Common::Thread::CpuRole::GpuFeed);
+		Log::WriteToConsoleAndLog(fmt::format("CPU layout: {}{}\n", Common::Thread::CpuLayoutText(),
+		                                      placed ? "" : " (GPU thread not placed)"));
 	}
 	g_gpu_state = gpu;
 

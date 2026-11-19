@@ -297,6 +297,8 @@ private:
 		Common::LiveControl::RegisterThread("record");
 		// Its latency is in every wait of the producer for the GPU.
 		Common::Thread::RaiseCurrentThreadPriority();
+		// A logical CPU of its own where the host CPU layout gives one (threads.h).
+		(void)Common::Thread::PlaceCurrentThread(Common::Thread::CpuRole::GpuRecord);
 		uint64_t current = 0;
 		for (;;) {
 			for (auto ready = m_published.load(std::memory_order_acquire); current == ready;

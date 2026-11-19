@@ -3,6 +3,7 @@
 #include "common/alignment.h"
 #include "common/assert.h"
 #include "common/liveControl.h"
+#include "common/spinWait.h"
 #include "common/virtualMemory.h"
 #include "graphics/host_gpu/regionDefinitions.h"
 #include "kernel/memory.h"
@@ -59,14 +60,13 @@ Common::LiveControl::Counter g_protect_pages_gpu("protect_pages_gpu");
 class SpinGuard final {
 public:
 	explicit SpinGuard(std::atomic_flag& lock): m_lock(lock) {
+		// Test, then set: waiters read the flag and leave the holder's cache line alone until
+		// it is free; past a short spin they give the CPU away (a preempted holder among them).
+		Common::SpinWait wait;
 		while (m_lock.test_and_set(std::memory_order_acquire)) {
-#if defined(__x86_64__) || defined(_M_X64)
-			_mm_pause();
-#elif defined(_M_ARM64)
-			__yield();
-#elif defined(__aarch64__)
-			asm volatile("yield");
-#endif
+			while (m_lock.test(std::memory_order_relaxed)) {
+				wait.Wait();
+			}
 		}
 	}
 	~SpinGuard() { m_lock.clear(std::memory_order_release); }

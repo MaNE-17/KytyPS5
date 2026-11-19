@@ -11,6 +11,37 @@ Numbers were measured on Saros with an RTX 4090 and an i9-13900K, each as an off
 inside one running session unless it says otherwise. They belong to the spot and settings named
 with them; other places and machines will differ.
 
+## This fork: CPUs with 8 cores (branch `saros-port-zen`)
+
+Work aimed at CPUs like the Ryzen 7 5700X (8 cores, 16 threads, one core class), where the
+measurements above (an i9-13900K: 8 fast cores, 16 small ones, 32 threads) leave the frame to
+one thread that shares its core with whatever else runs.
+
+- **The thread that feeds the GPU gets a core of its own** (`KYTY_CPU_LAYOUT`, on by default on
+  CPUs of one core class with 8 logical CPUs or more). On such a CPU every busy thread of the
+  process (the game's, the emulator's helpers, the graphics driver's) lands on the same 8
+  cores, and a thread whose SMT sibling is busy runs at about two thirds of its speed whatever
+  its priority. Through Windows' CPU sets the GPU thread now runs on a physical core whose
+  second logical CPU nobody else uses, the Vulkan recording thread gets one logical CPU of a
+  second core (with 12 logical CPUs or more), and everything else of the process runs on the
+  rest (13 of 16 on a 5700X). Core 0, which serves most interrupts, is never the reserved one.
+  The log says what was chosen (`CPU layout: ...`). `KYTY_CPU_LAYOUT=0` in the launcher's
+  Environment field turns it off, `=1` forces it on any CPU of 6 logical CPUs or more. Hybrid
+  CPUs and an explicit `KYTY_RENDER_CPUS` are left as before; the precompile pass keeps every
+  CPU.
+- **Spin locks give the CPU away after a short spin.** The locks of the page and region
+  trackers (taken by game threads on every write fault and by the GPU thread) only paused while
+  they waited. With more busy threads than logical CPUs a lock holder can be preempted, and its
+  waiters then spin out whole time slices. They now pause for about 20 to 40 µs (measured in
+  time stamp counter ticks, so the wait is the same on every CPU), then yield at every round;
+  the page tracker's lock also waits on reads instead of writing its cache line.
+- **Builds per CPU class** (`.github/workflows/zen-build.yml`): `znver3` for Ryzen 5000 and newer,
+  `x86-64-v3` for any AVX2 CPU, both with ThinLTO, -O3, profiling symbols and the Streamline
+  headers. A build for one CPU class is code scheduled for that core, not the i9's
+  (`-march=native` of `build-windows.cmd`).
+- Not measured on a 5700X yet. To compare, play the same spot with
+  `KYTY_PERF_LOG=10` and with `KYTY_PERF_LOG=10 KYTY_CPU_LAYOUT=0` in the Environment field.
+
 ## For players
 
 ### A launcher for Windows
