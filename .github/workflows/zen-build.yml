@@ -51,9 +51,9 @@ jobs:
           "root=$vcpkgRoot" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "port_hash=$($portHash.ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
-      - name: Cache glslang
+      - name: Restore glslang
         id: glslang_cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: ${{ steps.vcpkg.outputs.root }}\installed\x64-windows
           key: glslang-${{ runner.os }}-${{ runner.arch }}-${{ steps.vcpkg.outputs.port_hash }}-tools-opt
@@ -66,6 +66,14 @@ jobs:
             vcpkg install glslang[tools,opt]:x64-windows
           }
           "$vcpkgRoot\installed\x64-windows\tools\glslang" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      # Saved right away (not at the end of the job), so a later failing step keeps it.
+      - name: Save glslang
+        if: steps.glslang_cache.outputs.cache-hit != 'true' && matrix.arch == 'znver3'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ steps.vcpkg.outputs.root }}\installed\x64-windows
+          key: glslang-${{ runner.os }}-${{ runner.arch }}-${{ steps.vcpkg.outputs.port_hash }}-tools-opt
 
       - name: Streamline SDK headers
         shell: pwsh
@@ -84,7 +92,7 @@ jobs:
           gh release download --repo NVIDIA-RTX/Streamline --pattern $zip --dir _Build\deps\streamline\dl
           Expand-Archive -Path "_Build\deps\streamline\dl\$zip" -DestinationPath _Build\deps\streamline\x -Force
           $header = Get-ChildItem -Path _Build\deps\streamline\x -Recurse -Filter sl.h | Where-Object { $_.Directory.Name -eq 'include' } | Select-Object -First 1
-          if (-not $header) { Write-Host "sl.h not in $zip: frame generation is left out"; exit 0 }
+          if (-not $header) { Write-Host "sl.h not in ${zip}: frame generation is left out"; exit 0 }
           $root = $header.Directory.Parent.FullName
           New-Item -ItemType Directory -Force -Path _Build\deps\streamline | Out-Null
           Move-Item -Path $root -Destination $dest
