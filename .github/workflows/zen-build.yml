@@ -42,6 +42,36 @@ jobs:
       - name: Setup Visual Studio environment
         uses: ilammy/msvc-dev-cmd@v1
 
+      # The runner's Visual Studio has a newer C++ library than the standalone LLVM on its PATH
+      # understands (VS 18's STL wants Clang 22, C:\Program Files\LLVM is older): the LLVM that
+      # Visual Studio ships with that library goes first. Should it be older too, the library's
+      # own switch lets the build go on.
+      - name: Select clang-cl
+        shell: pwsh
+        run: |
+          $vsLlvm = Join-Path $env:VCINSTALLDIR "Tools\Llvm\x64\bin"
+          $candidates = @()
+          if (Test-Path (Join-Path $vsLlvm "clang-cl.exe")) { $candidates += $vsLlvm }
+          if (Test-Path "C:\Program Files\LLVM\bin\clang-cl.exe") { $candidates += "C:\Program Files\LLVM\bin" }
+          $best = $null; $bestMajor = 0
+          foreach ($dir in $candidates) {
+            $text = & (Join-Path $dir "clang-cl.exe") --version | Select-Object -First 1
+            Write-Host "$dir : $text"
+            if ($text -match 'version (\d+)\.') {
+              $major = [int]$Matches[1]
+              if ($major -gt $bestMajor) { $best = $dir; $bestMajor = $major }
+            }
+          }
+          if (-not $best) { throw "no clang-cl found" }
+          Write-Host "Using clang-cl $bestMajor from $best"
+          $best | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          $stl = [version]$env:VCToolsVersion
+          if ($stl -ge [version]"14.50" -and $bestMajor -lt 22) {
+            Write-Host "STL $stl with Clang $bestMajor - _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH"
+            "CFLAGS=/D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            "CXXFLAGS=/D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          }
+
       - name: Locate vcpkg
         id: vcpkg
         shell: pwsh
@@ -86,7 +116,7 @@ jobs:
           $dest = "_Build\deps\streamline\sdk"
           New-Item -ItemType Directory -Force -Path _Build\deps\streamline\dl | Out-Null
           $assets = gh release view --repo NVIDIA-RTX/Streamline --json assets --jq '.assets[].name'
-          $zip = $assets | Where-Object { $_ -match '\.zip$' -and $_ -notmatch 'debug|symbol|pdb' } | Select-Object -First 1
+          $zip = $assets | Where-Object { $_ -match '\.zip$' -and $_ -notmatch 'debug|symbol|pdb|aarch64|arm64' } | Select-Object -First 1
           if (-not $zip) { Write-Host "No Streamline zip found: frame generation is left out"; exit 0 }
           Write-Host "Streamline: $zip"
           gh release download --repo NVIDIA-RTX/Streamline --pattern $zip --dir _Build\deps\streamline\dl
